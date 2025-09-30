@@ -1,0 +1,85 @@
+name: Deploy with Docker Compose via SSH
+
+on:
+    push:
+        branches: main
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+
+            - name: Setup Java
+              uses: actions/setup-java@v4
+              with:
+                  java-version: "21"
+                  distribution: "temurin"
+
+            - name: Setup Gradle
+              uses: gradle/actions/setup-gradle@v4
+
+            - name: Make gradlew executable
+              run: chmod +x ./gradlew
+
+            - name: Build JAR
+              run: ./gradlew bootJar --no-daemon --build-cache -x test
+
+            - name: Upload JAR artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: app-jar
+                  path: build/libs/*.jar
+
+    deploy:
+        needs: build
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+
+            - name: Download JAR artifact
+              uses: actions/download-artifact@v4
+              with:
+                  name: app-jar
+                  path: ./build/libs/
+
+            - name: Copy JAR to server
+              uses: appleboy/scp-action@v0.1.7
+              with:
+                  host: ${{ secrets.SERVER_HOST }}
+                  username: ${{ secrets.SERVER_USER }}
+                  key: ${{ secrets.SSH_PRIVATE_KEY }}
+                  port: ${{ secrets.SERVER_PORT || 22 }}
+                  source: "build/libs/*.jar"
+                  target: "/opt/collabrick/"
+
+            - name: Deploy to server
+              uses: appleboy/ssh-action@v1.2.2
+              with:
+                  host: ${{ secrets.SERVER_HOST }}
+                  username: ${{ secrets.SERVER_USER }}
+                  key: ${{ secrets.SSH_PRIVATE_KEY }}
+                  port: ${{ secrets.SERVER_PORT || 22 }}
+                  script: |
+                      cd /opt/collabrick || exit 1
+
+                      if [ ! -d ".git" ]; then
+                        git clone ${{ github.server_url }}/${{ github.repository }} .
+                      else
+                        git fetch origin
+                        git reset --hard origin/${{ github.ref_name }}
+                      fi
+
+                      cat > .env << 'EOF'
+                      BASE_URL=${{ secrets.BASE_URL }}
+                      MAIL_USERNAME=${{ secrets.MAIL_USERNAME }}
+                      MAIL_PASSWORD=${{ secrets.MAIL_PASSWORD }}
+                      MAPBOX_ACCESS_TOKEN=${{ secrets.MAPBOX_ACCESS_TOKEN }}
+                      GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
+                      EOF
+
+                      docker compose down
+                      docker compose up -d --build
+                      docker compose ps
